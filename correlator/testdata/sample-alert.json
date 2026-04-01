@@ -1,0 +1,19 @@
+{
+  "status": "firing",
+  "labels": {
+    "alertname": "ServiceDown",
+    "host": "my-desktop",
+    "job": "windows-desktop",
+    "env": "dev",
+    "severity": "critical",
+    "type": "service",
+    "name": "my-service"
+  },
+  "annotations": {
+    "summary": "Service my-service is down"
+  },
+  "startsAt": "2026-04-01T10:00:00Z",
+  "endsAt": null,
+  "generatorURL": "http://localhost:9090/graph?g0.expr=windows_service_state",
+  "fingerprint": "test-fingerprint-service-down-001"
+}

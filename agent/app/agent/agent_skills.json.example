@@ -1,0 +1,46 @@
+[
+  {
+    "id": "chat_skill",
+    "name": "Chat Skill",
+    "description": "Answers any user questions with helpful and concise responses.",
+    "tags": ["chat", "general", "assistant"],
+    "examples": [
+      "Hello, how are you?",
+      "What is the weather in Tokyo?",
+      "Can you help me with a coding problem?"
+    ]
+  },
+  {
+    "id": "calendar_skill",
+    "name": "Calendar Assistant",
+    "description": "Helps with scheduling, availability checking, and calendar management.",
+    "tags": ["calendar", "scheduling", "availability"],
+    "examples": [
+      "Check my availability for next week",
+      "Schedule a meeting for tomorrow at 2 PM",
+      "What's on my calendar today?"
+    ]
+  },
+  {
+    "id": "code_help_skill",
+    "name": "Code Assistant",
+    "description": "Provides help with programming questions, code examples, and debugging.",
+    "tags": ["programming", "coding", "debugging", "technical"],
+    "examples": [
+      "How do I write a Python function?",
+      "Explain async/await in JavaScript",
+      "Help me debug this error"
+    ]
+  },
+  {
+    "id": "research_skill",
+    "name": "Research Assistant",
+    "description": "Helps with research, information gathering, and knowledge discovery.",
+    "tags": ["research", "information", "knowledge", "learning"],
+    "examples": [
+      "Tell me about quantum computing",
+      "Research the history of artificial intelligence",
+      "What are the latest developments in renewable energy?"
+    ]
+  }
+]

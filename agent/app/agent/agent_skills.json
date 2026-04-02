@@ -1,0 +1,13 @@
+[
+  {
+    "id": "ado_user_management",
+    "name": "Azure DevOps User Management",
+    "description": "Automates user access management for the v3e Azure DevOps organization. This agent extracts email addresses from JIRA ticket descriptions and adds users to the v3e/eee project with Basic license and Project Contributors permissions using the Member Entitlement API. The agent follows strict validation rules and provides clear error responses for missing or invalid requests.",
+    "tags": ["azure-devops", "user-management", "access-control", "jira-integration", "gitops"],
+    "examples": [
+      "Add user john.doe@example.com to the v3e organization",
+      "Process access request for new team member with email jane.smith@3ecompany.com",
+      "Grant Azure DevOps access to user from JIRA ticket description"
+    ]
+  }
+]

@@ -8,7 +8,7 @@ from .clients import LokiClient, PrometheusClient
 from .config import settings
 from .engine import CorrelationEngine
 from .models import AlertManagerAlert, AlertManagerWebhook
-from .publisher import JsonlFilePublisher, NoopPublisher, StdoutPublisher
+from .publisher import JsonlFilePublisher, NoopPublisher, RabbitMQPublisher, StdoutPublisher
 
 app = FastAPI(title=settings.app_name)
 
@@ -19,6 +19,14 @@ if settings.output_mode == "stdout":
     publisher = StdoutPublisher()
 elif settings.output_mode == "file":
     publisher = JsonlFilePublisher(settings.output_file_path)
+elif settings.output_mode == "rabbitmq":
+    publisher = RabbitMQPublisher(
+        rabbitmq_url=settings.rabbitmq_url,
+        exchange=settings.rabbitmq_exchange,
+        exchange_type=settings.rabbitmq_exchange_type,
+        queue=settings.rabbitmq_queue,
+        routing_key=settings.rabbitmq_routing_key,
+    )
 else:
     publisher = NoopPublisher()
 

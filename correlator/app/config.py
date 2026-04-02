@@ -21,8 +21,13 @@ class Settings(BaseSettings):
     debug_include_query_output: bool = False
     debug_max_chars_per_payload: int = 4000
 
-    output_mode: str = Field(default="stdout", description="stdout|file|noop")
+    output_mode: str = Field(default="stdout", description="stdout|file|rabbitmq|noop")
     output_file_path: str = "output/incidents.jsonl"
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    rabbitmq_exchange: str = "incidents.topic"
+    rabbitmq_exchange_type: str = "topic"
+    rabbitmq_queue: str = "agent.incidents.tasks"
+    rabbitmq_routing_key: str = "incidents.correlator.enriched"
 
     def get_watched_process_names(self) -> list[str]:
         if self.watched_process_names.strip():

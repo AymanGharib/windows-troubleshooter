@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from collections import defaultdict
@@ -10,13 +11,21 @@ from typing import Any
 from .clients import LokiClient, PrometheusClient
 from .config import Settings
 from .models import (
+    AgentHints,
     AlertManagerAlert,
+    AlertSummary,
     Assessment,
+    EvidenceSummary,
     EnrichedIncident,
     LogEntry,
+    LogSummary,
+    MetricSummary,
     MetricPoint,
     MetricSeries,
+    ScopeSummary,
+    SignalSummary,
     TimeWindow,
+    TimeSummary,
 )
 from .time_utils import build_window_from_alert, ns_to_datetime, seconds_to_ns
 
@@ -117,23 +126,14 @@ class CorrelationEngine:
         alert_name = alert.labels.get("alertname", "")
         stream_with_host = f'{{job="windows-eventlog",host="{host}"}}' if host else ""
         stream_any_host = '{job="windows-eventlog"}'
-
-        pattern_map = {
-            "ServiceDown": "Service Control Manager|7000|7009|7040|7045",
-            "ProcessDown": "terminated|crash|failed",
-            "ProcessHighCPU": "timeout|slow|blocked",
-            "ProcessHighMemory": "out of memory|memory|allocation",
-            "HighCPU": "cpu|processor|throttle|timeout",
-            "HighMemory": "memory|commit|paging|low virtual",
-            "LowDisk": "disk|ntfs|volsnap|space",
-        }
-        patt = pattern_map.get(alert_name, "error|fail|critical")
         queries: list[str] = []
+        process_name = alert.labels.get("process") or alert.labels.get("name", "")
+        log_filter = self._build_loki_filter(alert_name, process_name, alert.labels)
+
         if stream_with_host:
-            queries.append(f'{stream_with_host} |~ "(?i){patt}"')
-            queries.append(stream_with_host)
-        queries.append(f'{stream_any_host} |~ "(?i){patt}"')
-        queries.append(stream_any_host)
+            queries.append(f"{stream_with_host} {log_filter}")
+        else:
+            queries.append(f"{stream_any_host} {log_filter}")
         return queries
 
     async def fetch_and_correlate(self, alert: AlertManagerAlert) -> EnrichedIncident:
@@ -197,34 +197,12 @@ class CorrelationEngine:
             event_id=str(uuid.uuid4()),
             generated_at=datetime.now(UTC),
             incident_key=self.build_incident_key(alert),
-            alert={
-                "status": alert.status,
-                "labels": alert.labels,
-                "annotations": alert.annotations,
-                "starts_at": alert.startsAt.isoformat(),
-                "ends_at": self._serialize_ends_at(alert.endsAt),
-                "fingerprint": alert.fingerprint,
-            },
-            scope={
-                "host": alert.labels.get("host", "unknown-host"),
-                "env": alert.labels.get("env", self.settings.app_env),
-                "job": alert.labels.get("job", "unknown-job"),
-            },
-            window={
-                "start_ns": window.start_ns,
-                "end_ns": window.end_ns,
-                "start_utc": ns_to_datetime(window.start_ns).isoformat(),
-                "end_utc": ns_to_datetime(window.end_ns).isoformat(),
-                "lookback_seconds": self.settings.default_lookback_seconds,
-            },
-            evidence={
-                "metrics": [series.model_dump() for series in metrics_norm],
-                "logs": [entry.model_dump() for entry in logs_norm],
-                "signal_score": corr["signal_score"],
-                "log_score": corr["log_score"],
-                "top_log_signatures": corr["top_log_signatures"],
-            },
-            assessment=assessment,
+            alert=self._build_alert_summary(alert),
+            scope=self._build_scope_summary(alert),
+            time=self._build_time_summary(alert, window),
+            signal=self._build_signal_summary(assessment),
+            evidence_summary=self._build_evidence_summary(metrics_norm, logs_norm, corr),
+            agent_hints=self._build_agent_hints(alert, window),
             actions=actions,
             data_gaps=data_gaps,
             debug=debug_block,
@@ -238,15 +216,15 @@ class CorrelationEngine:
             for item in results:
                 labels = item.get("metric", {})
                 values = item.get("values", [])
-                points = []
+                parsed_points = []
                 for raw_ts, raw_val in values[: self.settings.max_metric_points_per_series]:
                     try:
-                        points.append(MetricPoint(ts_ns=seconds_to_ns(float(raw_ts)), value=float(raw_val)))
+                        parsed_points.append(MetricPoint(ts_ns=seconds_to_ns(float(raw_ts)), value=float(raw_val)))
                     except ValueError:
                         continue
-                if not points:
+                if not parsed_points:
                     continue
-                vals = [p.value for p in points]
+                vals = [p.value for p in parsed_points]
                 trend = "flat"
                 if len(vals) >= 2:
                     delta = vals[-1] - vals[0]
@@ -257,8 +235,10 @@ class CorrelationEngine:
                 series_out.append(
                     MetricSeries(
                         name=metric_name,
-                        labels=labels,
-                        points=points,
+                        labels=self._compact_metric_labels(labels),
+                        sample_count=len(parsed_points),
+                        first_ts_ns=parsed_points[0].ts_ns,
+                        last_ts_ns=parsed_points[-1].ts_ns,
                         min_value=min(vals),
                         max_value=max(vals),
                         current_value=vals[-1],
@@ -274,17 +254,124 @@ class CorrelationEngine:
             for stream in streams:
                 labels = stream.get("stream", {})
                 for raw_ts, line in stream.get("values", []):
-                    sig = self._line_signature(line)
+                    parsed_line = self._parse_loki_line(line, labels)
+                    if parsed_line is None:
+                        continue
+                    sig = self._line_signature(parsed_line.message)
                     if sig in dedup:
                         continue
                     try:
                         ts_ns = int(raw_ts)
                     except (TypeError, ValueError):
                         continue
-                    dedup[sig] = LogEntry(ts_ns=ts_ns, labels=labels, line=line.strip())
+                    dedup[sig] = LogEntry(
+                        ts_ns=ts_ns,
+                        labels=self._compact_log_labels(labels),
+                        source=parsed_line.source,
+                        channel=parsed_line.channel,
+                        event_id=parsed_line.event_id,
+                        level=parsed_line.level,
+                        message=parsed_line.message,
+                    )
 
         ordered = sorted(dedup.values(), key=lambda x: x.ts_ns, reverse=True)
         return ordered[: self.settings.max_logs_per_event]
+
+    def _build_alert_summary(self, alert: AlertManagerAlert) -> AlertSummary:
+        return AlertSummary(
+            name=alert.labels.get("alertname", "UnknownAlert"),
+            status=alert.status,
+            severity=alert.labels.get("severity"),
+            summary=alert.annotations.get("summary"),
+            fingerprint=alert.fingerprint,
+        )
+
+    def _build_scope_summary(self, alert: AlertManagerAlert) -> ScopeSummary:
+        resource_type, resource_name = self._build_resource_scope(alert)
+        return ScopeSummary(
+            host=alert.labels.get("host", "unknown-host"),
+            env=alert.labels.get("env", self.settings.app_env),
+            job=alert.labels.get("job", "unknown-job"),
+            resource_type=resource_type,
+            resource_name=resource_name,
+        )
+
+    def _build_time_summary(self, alert: AlertManagerAlert, window: TimeWindow) -> TimeSummary:
+        return TimeSummary(
+            alert_starts_at=alert.startsAt.isoformat(),
+            alert_ends_at=self._serialize_ends_at(alert.endsAt),
+            investigation_start=ns_to_datetime(window.start_ns).isoformat(),
+            investigation_end=ns_to_datetime(window.end_ns).isoformat(),
+            lookback_seconds=self.settings.default_lookback_seconds,
+        )
+
+    @staticmethod
+    def _build_signal_summary(assessment: Assessment) -> SignalSummary:
+        return SignalSummary(
+            category=assessment.category,
+            probable_cause=assessment.probable_cause,
+            impact=assessment.impact,
+            confidence=assessment.confidence,
+        )
+
+    def _build_evidence_summary(
+        self,
+        metrics: list[MetricSeries],
+        logs: list[LogEntry],
+        corr: dict[str, Any],
+    ) -> EvidenceSummary:
+        metric_summaries = [
+            MetricSummary(
+                name=series.name,
+                labels=series.labels,
+                sample_count=series.sample_count,
+                min_value=series.min_value,
+                max_value=series.max_value,
+                current_value=series.current_value,
+                trend=series.trend,
+            )
+            for series in metrics
+        ]
+        log_summary = LogSummary(
+            matching_log_count=len(logs),
+            top_signatures=corr["top_log_signatures"],
+        )
+        return EvidenceSummary(metric_summaries=metric_summaries, log_summary=log_summary)
+
+    def _build_agent_hints(self, alert: AlertManagerAlert, window: TimeWindow) -> AgentHints:
+        resource_type, resource_name = self._build_resource_scope(alert)
+        tools = ["get_windows_events", "get_prometheus_range"]
+        if resource_type == "disk":
+            tools = ["get_windows_events", "get_prometheus_range"]
+        elif resource_type == "process":
+            tools = ["get_windows_events", "get_prometheus_range"]
+        elif resource_type == "service":
+            tools = ["get_windows_events", "get_prometheus_range"]
+
+        return AgentHints(
+            recommended_tools=tools,
+            default_log_query={
+                "host": alert.labels.get("host", "unknown-host"),
+                "resource_type": resource_type,
+                "resource_name": resource_name,
+                "time_start": ns_to_datetime(window.start_ns).isoformat(),
+                "time_end": ns_to_datetime(window.end_ns).isoformat(),
+            },
+            priority="high" if alert.labels.get("severity") == "critical" else "normal",
+        )
+
+    @staticmethod
+    def _build_resource_scope(alert: AlertManagerAlert) -> tuple[str, str | None]:
+        alert_name = alert.labels.get("alertname", "")
+        if alert_name.startswith("Process"):
+            return "process", alert.labels.get("process") or alert.labels.get("name")
+        if alert_name == "ServiceDown":
+            return "service", alert.labels.get("name")
+        if alert_name == "LowDisk":
+            return "disk", alert.labels.get("volume")
+        if alert_name in {"HighCPU", "HighMemory"}:
+            return "host", alert.labels.get("host")
+        return "unknown", None
 
     def correlate_evidence(
         self,
@@ -319,7 +406,7 @@ class CorrelationEngine:
         start, end = window.start_ns, window.end_ns
         for entry in logs:
             if start <= entry.ts_ns <= end:
-                top_log_signatures[self._line_signature(entry.line)] += 1
+                top_log_signatures[self._line_signature(entry.message)] += 1
 
         log_score = min(1.0, 0.1 * len(top_log_signatures))
         top_sorted = sorted(top_log_signatures.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -394,6 +481,67 @@ class CorrelationEngine:
         if len(normalized) > 120:
             normalized = normalized[:120]
         return normalized
+
+    def _build_loki_filter(self, alert_name: str, process_name: str, labels: dict[str, str]) -> str:
+        escaped_process = re.escape(process_name) if process_name else ""
+        volume = re.escape(labels.get("volume", ""))
+
+        pattern_map = {
+            "ServiceDown": r"Service Control Manager|7000|7009|7031|7040|7045|service",
+            "ProcessDown": rf"{escaped_process}|terminated|crash|failed|not found|missing|exit",
+            "ProcessHighCPU": rf"{escaped_process}|cpu|slow|timeout|blocked",
+            "ProcessHighMemory": rf"{escaped_process}|memory|allocation|out of memory|oom",
+            "HighCPU": r"cpu|processor|throttle|timeout",
+            "HighMemory": r"memory|commit|paging|low virtual|oom",
+            "LowDisk": rf"{volume}|disk|ntfs|volsnap|space|storage|volume",
+        }
+        pattern = pattern_map.get(alert_name, r"error|fail|critical")
+        pattern = pattern.strip("|")
+
+        if alert_name.startswith("Process") and process_name:
+            return f'|~ "(?i){pattern}" !~ "(?i)alloy|grafana alloy"'
+        return f'|~ "(?i){pattern}"'
+
+    @staticmethod
+    def _compact_metric_labels(labels: dict[str, str]) -> dict[str, str]:
+        keep = {"host", "process", "name", "volume", "state", "mode", "job", "env"}
+        return {k: v for k, v in labels.items() if k in keep}
+
+    @staticmethod
+    def _compact_log_labels(labels: dict[str, str]) -> dict[str, str]:
+        keep = {"host", "job", "channel", "computer"}
+        return {k: v for k, v in labels.items() if k in keep}
+
+    def _parse_loki_line(self, line: str, labels: dict[str, str]) -> LogEntry | None:
+        text = line.strip()
+        parsed: dict[str, Any] = {}
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = {}
+
+        source = parsed.get("source")
+        channel = parsed.get("channel") or labels.get("channel")
+        event_id = parsed.get("event_id")
+        level = parsed.get("levelText") or parsed.get("level")
+        message = parsed.get("message") or text
+        message = " ".join(str(message).split())
+        if len(message) > 280:
+            message = message[:277] + "..."
+
+        if not message:
+            return None
+
+        return LogEntry(
+            ts_ns=0,
+            labels={},
+            source=source,
+            channel=channel,
+            event_id=event_id if isinstance(event_id, int) else None,
+            level=str(level) if level is not None else None,
+            message=message,
+        )
 
     def _truncate_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         max_chars = self.settings.debug_max_chars_per_payload

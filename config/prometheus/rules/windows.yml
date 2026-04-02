@@ -11,6 +11,9 @@ groups:
         labels:
           severity: warning
           type: cpu
+          host: my-desktop
+          job: windows-desktop
+          env: dev
         annotations:
           summary: "CPU above 80%"
 
@@ -22,6 +25,9 @@ groups:
         labels:
           severity: warning
           type: memory
+          host: my-desktop
+          job: windows-desktop
+          env: dev
         annotations:
           summary: "Memory above 85%"
 
@@ -33,6 +39,9 @@ groups:
         labels:
           severity: critical
           type: disk
+          host: my-desktop
+          job: windows-desktop
+          env: dev
         annotations:
           summary: "C: drive below 15% free"
 

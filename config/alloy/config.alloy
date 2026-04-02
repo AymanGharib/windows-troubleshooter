@@ -1,0 +1,35 @@
+logging {
+  level = "info"
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://localhost:3100/loki/api/v1/push"
+  }
+}
+
+loki.source.windowsevent "system" {
+  eventlog_name          = "System"
+  xpath_query            = "*"
+  bookmark_path          = "C:/ProgramData/alloy/bookmark-system.xml"
+  use_incoming_timestamp = true
+  labels = {
+    job     = "windows-eventlog",
+    channel = "System",
+    host    = "my-desktop",
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.source.windowsevent "application" {
+  eventlog_name          = "Application"
+  xpath_query            = "*"
+  bookmark_path          = "C:/ProgramData/alloy/bookmark-application.xml"
+  use_incoming_timestamp = true
+  labels = {
+    job     = "windows-eventlog",
+    channel = "Application",
+    host    = "my-desktop",
+  }
+  forward_to = [loki.write.local.receiver]
+}

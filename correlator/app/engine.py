@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -46,6 +47,8 @@ class CorrelationEngine:
         host = alert.labels.get("host", "my-desktop")
         alert_name = alert.labels.get("alertname", "")
         base_host = f'{{host="{host}"}}'
+        process_selector = self._build_process_selector(alert)
+        service_selector = self._build_service_selector(alert)
 
         query_map: dict[str, list[tuple[str, str]]] = {
             "HighCPU": [
@@ -66,37 +69,25 @@ class CorrelationEngine:
             "ProcessDown": [
                 (
                     "process_absent",
-                    'absent_over_time(windows_process_cpu_time_total{mode="user",process=~"(?i)wordpad|write"}[1m])',
+                    f"absent_over_time(windows_process_cpu_time_total{{mode=\"user\",{process_selector}}}[1m])",
                 ),
             ],
             "ProcessHighCPU": [
                 (
                     "process_cpu_pct",
-                    'rate(windows_process_cpu_time_total{mode="user",process=~"(?i)wordpad|write"}[2m]) * 100',
+                    f"rate(windows_process_cpu_time_total{{mode=\"user\",{process_selector}}}[2m]) * 100",
                 ),
             ],
             "ProcessHighMemory": [
                 (
                     "process_memory_bytes",
-                    'windows_process_working_set_bytes{process=~"(?i)wordpad|write"}',
+                    f"windows_process_working_set_bytes{{{process_selector}}}",
                 ),
             ],
             "ServiceDown": [
                 (
                     "service_running_state",
-                    'windows_service_state{state="running",name=~"my-service|my-worker|my-api"}',
-                ),
-            ],
-            "TestProcessRunning": [
-                (
-                    "test_process_running",
-                    'count(windows_process_cpu_time_total{mode="user",process=~"(?i)wordpad|write"})',
-                ),
-            ],
-            "TestProcessMissing": [
-                (
-                    "test_process_absent",
-                    'absent_over_time(windows_process_cpu_time_total{mode="user",process=~"(?i)wordpad|write"}[1m])',
+                    f'windows_service_state{{state="running",{service_selector}}}',
                 ),
             ],
         }
@@ -108,6 +99,18 @@ class CorrelationEngine:
             else:
                 out.append((name, q))
         return out
+
+    def _build_process_selector(self, alert: AlertManagerAlert) -> str:
+        process_name = alert.labels.get("process") or alert.labels.get("name")
+        if process_name:
+            return f'process=~"(?i)^{re.escape(process_name)}$"'
+        return f'process=~"{self.settings.watched_process_regex}"'
+
+    def _build_service_selector(self, alert: AlertManagerAlert) -> str:
+        service_name = alert.labels.get("name")
+        if service_name:
+            return f'name="{service_name}"'
+        return 'name=~"my-service|my-worker|my-api"'
 
     def build_loki_queries(self, alert: AlertManagerAlert) -> list[str]:
         host = alert.labels.get("host")
@@ -306,8 +309,6 @@ class CorrelationEngine:
                 signal_score += 0.6
             elif alert_name == "ServiceDown" and val <= 0:
                 signal_score += 0.6
-            elif alert_name in {"TestProcessRunning", "TestProcessMissing"} and val > 0:
-                signal_score += 0.4
             elif alert_name in {"ProcessHighCPU", "ProcessHighMemory"}:
                 signal_score += 0.3
             else:
@@ -346,8 +347,6 @@ class CorrelationEngine:
             "ProcessHighCPU": ("process_resource_pressure", "process_cpu_hotspot", "slow_responses"),
             "ProcessHighMemory": ("process_resource_pressure", "process_memory_growth", "oom_risk"),
             "ServiceDown": ("availability", "windows_service_stopped", "service_unavailable"),
-            "TestProcessRunning": ("test_signal", "test_process_detected", "none"),
-            "TestProcessMissing": ("test_signal", "test_process_not_detected", "none"),
         }
         category, cause, impact = mapping.get(alert_name, ("unknown", "unknown_cause", "unknown_impact"))
 

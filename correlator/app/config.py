@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     prometheus_base_url: str = "http://localhost:9090"
     loki_base_url: str = "http://localhost:3100"
+    watched_process_regex: str = "(?i)wordpad|write"
+    watched_process_names: str = ""
 
     default_lookback_seconds: int = 300
     max_logs_per_event: int = 30
@@ -21,6 +23,15 @@ class Settings(BaseSettings):
 
     output_mode: str = Field(default="stdout", description="stdout|file|noop")
     output_file_path: str = "output/incidents.jsonl"
+
+    def get_watched_process_names(self) -> list[str]:
+        if self.watched_process_names.strip():
+            names = [item.strip() for item in self.watched_process_names.split(",")]
+            return [item for item in names if item]
+
+        cleaned = self.watched_process_regex.replace("(?i)", "")
+        parts = [item.strip() for item in cleaned.split("|")]
+        return [item for item in parts if item]
 
 
 settings = Settings()

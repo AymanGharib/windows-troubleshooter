@@ -36,47 +36,10 @@ groups:
         annotations:
           summary: "C: drive below 15% free"
 
-  - name: windows_processes
-    rules:
-
-      # Fires when WordPad process metrics are absent for 1 minute.
-      - alert: ProcessDown
-        expr: |
-          absent_over_time(windows_process_cpu_time_total{
-            mode="user",
-            process=~"(?i)wordpad|write"
-          }[1m])
-        for: 30s
-        labels:
-          severity: critical
-          type: process
-        annotations:
-          summary: "WordPad process is missing"
-
-      - alert: ProcessHighCPU
-        expr: |
-          rate(windows_process_cpu_time_total{
-            mode="user",
-            process=~"(?i)wordpad|write"
-          }[2m]) * 100 > 60
-        for: 3m
-        labels:
-          severity: warning
-          type: process_cpu
-        annotations:
-          summary: "Process {{ $labels.process }} using >60% CPU"
-
-      - alert: ProcessHighMemory
-        expr: |
-          windows_process_working_set_bytes{
-            process=~"(?i)wordpad|write"
-          } > 1073741824
-        for: 3m
-        labels:
-          severity: warning
-          type: process_memory
-        annotations:
-          summary: "Process {{ $labels.process }} using >1GB RAM"
+  # Process-specific rules are generated into:
+  #   config/prometheus/rules/generated-processes.yml
+  # Run:
+  #   powershell -ExecutionPolicy Bypass -File .\config\prometheus\render-process-rules.ps1
 
   - name: windows_services
     rules:

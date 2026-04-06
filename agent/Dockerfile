@@ -14,6 +14,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git \
         curl \
+        nodejs \
+        npm \
+    && npm install -g @anthropic-ai/claude-code \
+    && npm cache clean --force \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -24,7 +28,7 @@ RUN pip install --upgrade pip && \
 
 # --- Copy Application Code ---
 COPY app/ app/
-COPY .env.example .env
+#COPY .env .env
 
 # --- Run the standalone server ---
 CMD ["python", "-m", "app"]

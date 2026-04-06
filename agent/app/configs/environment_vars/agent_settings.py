@@ -25,6 +25,10 @@ class AgentSettings:
     USE_TOOL_CALLBACK: bool = False
     TOOL_CALLBACK_METHOD: Optional[str] = None
 
+    # Debug / runtime toggles
+    AGENT_ENABLE_LOCAL_MCP: bool = True
+    AGENT_DEBUG: bool = False
+
 def load_agent_settings() -> AgentSettings:
     return AgentSettings(
         AGENT_NAME=os.getenv("AGENT_NAME", "Assistant Agent"),
@@ -37,6 +41,8 @@ def load_agent_settings() -> AgentSettings:
         AGENT_MAX_TURNS=env_int("AGENT_MAX_TURNS", 0) if os.getenv("AGENT_MAX_TURNS") else None,
         USE_TOOL_CALLBACK=env_bool("USE_TOOL_CALLBACK", default=False),
         TOOL_CALLBACK_METHOD=os.getenv("TOOL_CALLBACK_METHOD"),
+        AGENT_ENABLE_LOCAL_MCP=env_bool("AGENT_ENABLE_LOCAL_MCP", default=True),
+        AGENT_DEBUG=env_bool("AGENT_DEBUG", default=False),
     )
 
 

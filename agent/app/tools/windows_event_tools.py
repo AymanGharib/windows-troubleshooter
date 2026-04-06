@@ -32,6 +32,15 @@ def _build_loki_query(host: str, resource_name: str) -> str:
     return selector
 
 
+def _looks_like_logql(query: str) -> bool:
+    """Conservative LogQL shape check to avoid SQL/plain-text queries."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    # Require a selector start for query_range usage in our flow.
+    return q.startswith("{") and "}" in q
+
+
 @tool(
     "get_windows_events",
     "Fetch Windows event log lines from Loki for a host and incident time window.",
@@ -50,7 +59,11 @@ async def get_windows_events_mcp(args: dict[str, Any]) -> dict[str, Any]:
     base_url = monitoring.LOKI_BASE_URL.rstrip("/")
 
     host = args["host"]
-    query = args.get("query") or _build_loki_query(host=host, resource_name=args.get("resource_name", ""))
+    provided_query = str(args.get("query") or "").strip()
+    if _looks_like_logql(provided_query):
+        query = provided_query
+    else:
+        query = _build_loki_query(host=host, resource_name=args.get("resource_name", ""))
     params = {
         "query": query,
         "start": args["time_start"],
@@ -80,6 +93,7 @@ async def get_windows_events_mcp(args: dict[str, Any]) -> dict[str, Any]:
             "ok": True,
             "tool": "get_windows_events",
             "base_url": base_url,
+            "query_fallback_used": bool(provided_query) and query != provided_query,
             "params": params,
             "resultType": data.get("data", {}).get("resultType"),
             "result": data.get("data", {}).get("result", []),

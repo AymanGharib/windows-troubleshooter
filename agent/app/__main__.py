@@ -1,9 +1,4 @@
-"""
-Bootstrap the incident agent in RabbitMQ consumer mode.
-
-Consumes correlated incidents from RabbitMQ and publishes progress/results to
-the result queue.
-"""
+"""Bootstrap the agent in HTTP or RabbitMQ mode."""
 
 import logging
 import sys
@@ -24,15 +19,15 @@ logger = get_logger(__name__)
 def main():
     """Main entry point - starts RabbitMQ consumer."""
     logger.info("=" * 60)
-    logger.info("Starting Incident Agent RabbitMQ Consumer")
+    logger.info("Starting Agent Service")
     logger.info("=" * 60)
 
     try:
         rabbitmq_config = AppConfig.get_rabbitmq_config()
         logger.info(f"RabbitMQ URL: {rabbitmq_config.RABBITMQ_URL}")
-        logger.info(f"Incident Queue: {rabbitmq_config.RABBITMQ_TASK_QUEUE}")
-        logger.info(f"Incident Exchange: {rabbitmq_config.RABBITMQ_EXCHANGE}")
-        logger.info(f"Incident Routing Key: {rabbitmq_config.RABBITMQ_ROUTING_KEY}")
+        logger.info(f"Task Queue: {rabbitmq_config.RABBITMQ_TASK_QUEUE}")
+        logger.info(f"Exchange: {rabbitmq_config.RABBITMQ_EXCHANGE}")
+        logger.info(f"Routing Key: {rabbitmq_config.RABBITMQ_ROUTING_KEY}")
         logger.info(f"Result Queue: {rabbitmq_config.RABBITMQ_RESULT_QUEUE}")
     except Exception as e:
         logger.error(f"Failed to get RabbitMQ config: {e}")

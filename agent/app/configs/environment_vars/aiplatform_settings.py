@@ -23,11 +23,24 @@ class AIPlatformSettings:
 
 
 def load_aiplatform_settings() -> AIPlatformSettings:
-    return AIPlatformSettings(
+    settings = AIPlatformSettings(
         AIPLATFORM_API_KEY=os.getenv("AIPLATFORM_API_KEY", ""),
         AIPLATFORM_BASE_URL=os.getenv("AIPLATFORM_BASE_URL"),
         AIPLATFORM_TIMEOUT=env_int("AIPLATFORM_TIMEOUT", 120),
     )
+
+    # Map to what Claude CLI subprocess actually looks for
+    if settings.AIPLATFORM_BASE_URL:
+        os.environ["ANTHROPIC_BASE_URL"] = settings.AIPLATFORM_BASE_URL
+
+    if settings.AIPLATFORM_API_KEY:
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = settings.AIPLATFORM_API_KEY
+
+    
+    return settings
+    
+
+
 
 
 # Singleton settings object used across the app

@@ -9,6 +9,7 @@ Claude-backed agent runtime wrapper for the Claude Agent SDK.
 
 from __future__ import annotations
 
+import time
 from typing import Any, AsyncIterable, Optional
 
 from claude_agent_sdk import (
@@ -71,6 +72,17 @@ class ClaudeAIAgent:
 
         # Load MCP servers
         self.local_mcp_server = AppConfig.create_local_mcp_server()
+        self.debug_enabled = bool(getattr(self.agent_config, "AGENT_DEBUG", False))
+
+        if self.debug_enabled:
+            logger.info(
+                "ClaudeAIAgent init: model=%s base_url=%s local_mcp=%s permission_mode=%s max_turns=%s",
+                self.model_config.MODEL_NAME,
+                getattr(self.platform_config, "AIPLATFORM_BASE_URL", None),
+                bool(self.local_mcp_server),
+                getattr(self.agent_config, "AGENT_PERMISSION_MODE", None),
+                getattr(self.agent_config, "AGENT_MAX_TURNS", None),
+            )
 
         # Build Claude Agent Options using unified helper function
         # Extract configuration values
@@ -155,14 +167,25 @@ class ClaudeAIAgent:
 
         # Connect MCP servers if needed
         if self.local_mcp_server and hasattr(self.local_mcp_server, "connect"):
+            if self.debug_enabled:
+                logger.info("Connecting local MCP server before invoke()")
             await self.local_mcp_server.connect()
+            if self.debug_enabled:
+                logger.info("Local MCP server connected")
 
         try:
             logger.debug("invoke(): ClaudeSDKClient with context_id=%r agent_id=%r header=%r", context_id, self.agent_id, custom_headers_dict)
+            if self.debug_enabled:
+                logger.info("Opening ClaudeSDKClient session for invoke()")
+                invoke_start = time.perf_counter()
 
             # Use ClaudeSDKClient with updated options
             async with ClaudeSDKClient(options=options_with_headers) as client:
+                if self.debug_enabled:
+                    logger.info("ClaudeSDKClient session opened in %.2f ms", (time.perf_counter() - invoke_start) * 1000)
                 await client.query(question)
+                if self.debug_enabled:
+                    logger.info("ClaudeSDKClient query submitted")
 
                 response_parts = []  # Temporary storage for AssistantMessage chunks
                 tools_used = []      # Track tools used during conversation
@@ -207,7 +230,11 @@ class ClaudeAIAgent:
         finally:
             # Clean up MCP servers
             if self.local_mcp_server and hasattr(self.local_mcp_server, "cleanup"):
+                if self.debug_enabled:
+                    logger.info("Cleaning up local MCP server after invoke()")
                 await self.local_mcp_server.cleanup()
+                if self.debug_enabled:
+                    logger.info("Local MCP server cleanup completed")
 
         # Use FinalResult text if available, otherwise fallback to accumulated AssistantMessage chunks
         if final_result_text:
@@ -258,14 +285,25 @@ class ClaudeAIAgent:
 
         # Connect MCP servers if needed
         if self.local_mcp_server and hasattr(self.local_mcp_server, "connect"):
+            if self.debug_enabled:
+                logger.info("Connecting local MCP server before stream()")
             await self.local_mcp_server.connect()
+            if self.debug_enabled:
+                logger.info("Local MCP server connected")
 
         try:
             logger.debug("stream(): ClaudeSDKClient streaming with context_id=%r agent_id=%r header=%r", context_id, self.agent_id, custom_headers_dict)
+            if self.debug_enabled:
+                logger.info("Opening ClaudeSDKClient session for stream()")
+                stream_start = time.perf_counter()
 
             # Use ClaudeSDKClient with updated options
             async with ClaudeSDKClient(options=options_with_header) as client:
+                if self.debug_enabled:
+                    logger.info("ClaudeSDKClient stream session opened in %.2f ms", (time.perf_counter() - stream_start) * 1000)
                 await client.query(question)
+                if self.debug_enabled:
+                    logger.info("ClaudeSDKClient stream query submitted")
 
                 final_result_text = None
                 final_metadata = None
@@ -323,7 +361,11 @@ class ClaudeAIAgent:
         finally:
             # Clean up MCP servers
             if self.local_mcp_server and hasattr(self.local_mcp_server, "cleanup"):
+                if self.debug_enabled:
+                    logger.info("Cleaning up local MCP server after stream()")
                 await self.local_mcp_server.cleanup()
+                if self.debug_enabled:
+                    logger.info("Local MCP server cleanup completed")
 
         # Yield final result with metadata
         final_text = final_result_text if final_result_text is not None else ""

@@ -33,4 +33,19 @@ services:
       - ./config/promtail/promtail-linux.yml:/etc/promtail/promtail.yml:ro
       - /var/log:/var/log:ro
 
+  proxy:
+    build:
+      context:  claude-code-proxy   
+    restart: unless-stopped
+    env_file:
+      -  claude-code-proxy\.env
+    ports:
+      - 8232:8232
+
   
+  agent:
+     build: 
+       context: agent
+     env_file:
+        - agent/.env
+     restart: unless-stopped

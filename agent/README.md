@@ -160,6 +160,8 @@ AGENT_NAME=v3e Organization Access Bot
 AGENT_SYSTEM_PROMPT=You are the v3e Organization Access Bot. Your goal is to extract a user's email address from a JIRA description and add them to Azure DevOps.
 USE_TOOL_CALLBACK=true
 TOOL_CALLBACK_METHOD=security_callback
+AGENT_ENABLE_LOCAL_MCP=true
+AGENT_DEBUG=false
 ```
 
 #### Azure DevOps Settings

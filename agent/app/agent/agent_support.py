@@ -8,6 +8,7 @@ multiple files. All agent configuration and behavior is controlled through these
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 # Claude Agent SDK imports
@@ -21,6 +22,13 @@ from app.config import AppConfig
 from app.agent.tool_callbacks import default_callback
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_enabled() -> bool:
+    try:
+        return bool(getattr(AppConfig.get_agent_config(), "AGENT_DEBUG", False))
+    except Exception:
+        return False
 
 
 def build_header_string(custom_headers: dict) -> str:
@@ -94,6 +102,7 @@ def build_claude_options(
     """
 
     try:
+        debug_enabled = _debug_enabled()
         # If base_options provided, use as foundation (runtime injection mode)
         if base_options is not None:
             base_env = getattr(base_options, 'env', {}).copy()
@@ -103,6 +112,13 @@ def build_claude_options(
                 base_env['ANTHROPIC_CUSTOM_HEADERS'] = build_header_string(custom_headers)
 
             # Create new options with updated environment and session management
+            if debug_enabled:
+                logger.info(
+                    "Claude options runtime update: resume=%s fork_session=%s custom_headers=%s",
+                    bool(resume),
+                    bool(fork_session),
+                    list(custom_headers.keys()) if custom_headers else [],
+                )
             return ClaudeAgentOptions(
                 system_prompt=getattr(base_options, 'system_prompt', None),
                 env=base_env,
@@ -199,6 +215,18 @@ def build_claude_options(
             options_kwargs["mcp_servers"] = mcp_servers
             logger.info("Added MCP servers to Claude options")
 
+        if debug_enabled:
+            logger.info(
+                "Claude options built: model=%s base_url=%s permission_mode=%s cwd=%s max_turns=%s mcp_enabled=%s setting_sources=%s",
+                model,
+                bool(base_url),
+                permission_mode,
+                cwd,
+                max_turns,
+                bool(mcp_servers),
+                setting_sources,
+            )
+
         # Add session management parameters if provided
         if resume is not None:
             options_kwargs["resume"] = resume
@@ -224,6 +252,7 @@ def build_claude_sdk_mcp_server() -> Any:
     try:
         from app.tools import discover_local_mcp_tools
 
+        start_time = time.perf_counter()
         # Auto-discover all MCP tools
         tools = discover_local_mcp_tools()
 
@@ -239,6 +268,8 @@ def build_claude_sdk_mcp_server() -> Any:
         )
 
         logger.info("Created Claude SDK MCP server with %d auto-discovered tools", len(tools))
+        if _debug_enabled():
+            logger.info("MCP server creation took %.2f ms", (time.perf_counter() - start_time) * 1000)
         return server
 
     except Exception as e:
@@ -316,5 +347,4 @@ def extract_stream_text_piece(event: Any) -> Optional[str]:
     if text_piece:
         return str(text_piece)
     return None
-
 

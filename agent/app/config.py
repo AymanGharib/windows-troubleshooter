@@ -138,6 +138,11 @@ class AppConfig:
         """Create local MCP server with auto-discovered tools."""
         from claude_agent_sdk import create_sdk_mcp_server
 
+        agent_config = AppConfig.get_agent_config()
+        if not getattr(agent_config, "AGENT_ENABLE_LOCAL_MCP", True):
+            logger.info("Local MCP server disabled by AGENT_ENABLE_LOCAL_MCP=false")
+            return None
+
         tools = discover_local_mcp_tools()
         if not tools:
             logger.warning("No MCP tools discovered for local server")

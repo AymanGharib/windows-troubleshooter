@@ -124,7 +124,8 @@ class CorrelationEngine:
     def build_loki_queries(self, alert: AlertManagerAlert) -> list[str]:
         host = alert.labels.get("host")
         alert_name = alert.labels.get("alertname", "")
-        stream_with_host = f'{{job="windows-eventlog",host="{host}"}}' if host else ""
+        escaped_host = host.replace('"', '\\"') if host else None
+        stream_with_host = f'{{job="windows-eventlog",host="{escaped_host}"}}' if escaped_host else ""
         stream_any_host = '{job="windows-eventlog"}'
         queries: list[str] = []
         process_name = alert.labels.get("process") or alert.labels.get("name", "")
@@ -158,10 +159,11 @@ class CorrelationEngine:
 
         try:
             for idx, q in enumerate(loki_queries):
+                safe_query = self._sanitize_loki_query(q)
                 if self.settings.debug_include_query_output:
-                    loki_debug_queries.append({"name": f"q{idx + 1}", "query": q})
+                    loki_debug_queries.append({"name": f"q{idx + 1}", "query": safe_query})
                 loki_raw[f"q{idx + 1}"] = await self.loki.query_range(
-                    q,
+                    safe_query,
                     window.start_ns,
                     window.end_ns,
                     limit=self.settings.max_logs_per_event * 3,
@@ -481,6 +483,17 @@ class CorrelationEngine:
         if len(normalized) > 120:
             normalized = normalized[:120]
         return normalized
+
+    @staticmethod
+    def _looks_like_logql(query: str) -> bool:
+        q = (query or "").strip()
+        return bool(q) and q.startswith("{") and "}" in q
+
+    def _sanitize_loki_query(self, query: str) -> str:
+        q = (query or "").strip()
+        if self._looks_like_logql(q):
+            return q
+        return '{job="windows-eventlog"} |~ "(?i)error|fail|critical"'
 
     def _build_loki_filter(self, alert_name: str, process_name: str, labels: dict[str, str]) -> str:
         escaped_process = re.escape(process_name) if process_name else ""

@@ -1,70 +1,29 @@
 """
-RabbitMQ consumer for incident-driven agent execution.
+Generic RabbitMQ consumer for agent execution.
 
-This module consumes correlated incidents from RabbitMQ, forwards them to the
-Claude Agent SDK wrapper, and publishes status updates to the result queue.
+Consumes task messages, invokes ClaudeAIAgent, and publishes a compact result
+message to the configured result queue.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
-import pika
-import re
 import sys
 from typing import Any
 
-# Add parent directory to path for shared modules.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
+import aio_pika
+from aio_pika import IncomingMessage
 
 from app.agent.claude_agent import ClaudeAIAgent
-from app.agent.incident_prompt_builder import build_incident_prompt
-from app.agent.incident_skills import select_incident_skills
-from app.agent.result_schema import TroubleshootingResult
 from app.common.utils import get_logger
 from app.config import AppConfig
 from app.rabbitmq.publisher import publish_message
-from pydantic import ValidationError
 
 logger = get_logger(__name__)
 
 
-def report_to_ui(
-    job_id: str,
-    ticket_id: str,
-    reporter_id: str,
-    status_type: str,
-    level: str,
-    source: str,
-    message: str,
-    status: str | None = None,
-    progress: int | None = None,
-    details: dict[str, Any] | None = None,
-) -> None:
-    """Publish a progress or status update to the result queue."""
-    event = {
-        "job_id": job_id,
-        "ticket_id": ticket_id,
-        "reporter_id": reporter_id,
-        "type": status_type,
-        "level": level,
-        "source": source,
-        "message": message,
-    }
-    if status:
-        event["status"] = status
-    if progress is not None:
-        event["progress"] = progress
-    if details:
-        event.update(details)
-
-    rabbitmq_config = AppConfig.get_rabbitmq_config()
-    publish_message(rabbitmq_config.RABBITMQ_RESULT_QUEUE, event)
-
-
-def _extract_agent_response_text(result: dict) -> str:
-    """Handle the current ClaudeAIAgent return shape with a small fallback."""
+def _extract_agent_response_text(result: dict[str, Any]) -> str:
     text = result.get("text")
     if isinstance(text, str):
         return text
@@ -77,334 +36,169 @@ def _extract_agent_response_text(result: dict) -> str:
     return ""
 
 
-def _extract_json_payload(response: str) -> dict[str, Any]:
-    """Extract JSON payload from plain text or fenced JSON response."""
-    json_match = re.search(r"```(?:json)?\s*(.*?)\s*```", response, re.DOTALL)
-    json_str = json_match.group(1) if json_match else response
-    return json.loads(json_str)
+def _build_prompt(data: dict[str, Any]) -> str:
+    for key in ("prompt", "description", "message", "query", "text"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-def _build_result_details(result: TroubleshootingResult) -> dict[str, Any]:
-    """Convert validated result into compact event metadata."""
-    remediation = result.recommended_remediation
-    return {
-        "mode": result.mode,
-        "summary": result.summary,
-        "confidence": result.confidence,
-        "probable_cause": result.diagnosis.probable_cause,
-        "needs_human": result.needs_human,
-        "recommended_action": remediation.action,
-        "recommended_command": remediation.command,
-    }
+def _extract_ids(data: dict[str, Any]) -> tuple[str, str, str]:
+    job_id = str(data.get("job_id") or data.get("event_id") or data.get("id") or "")
+    ticket_id = str(data.get("ticket_id") or data.get("incident_key") or "")
+    reporter_id = str(data.get("reporter_id") or "")
+    return job_id, ticket_id, reporter_id
 
 
-def process_ticket(
-    ch: pika.channel.Channel,
-    method: pika.spec.Basic.Deliver,
-    properties: pika.spec.BasicProperties,
-    body: bytes,
+def _publish_result(
+    *,
+    job_id: str,
+    ticket_id: str,
+    reporter_id: str,
+    status: str,
+    message: str,
+    result_text: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Process a correlated incident from RabbitMQ using the Claude agent."""
-    job_id = None
-    ticket_id = None
-    reporter_id = None
+    rabbitmq_config = AppConfig.get_rabbitmq_config()
+    payload: dict[str, Any] = {
+        "job_id": job_id,
+        "ticket_id": ticket_id,
+        "reporter_id": reporter_id,
+        "status": status,
+        "message": message,
+        "result_text": result_text,
+    }
+    if metadata:
+        payload["metadata"] = metadata
+
+    publish_message(rabbitmq_config.RABBITMQ_RESULT_QUEUE, payload)
+
+
+def _log_result_json(job_id: str, ticket_id: str, result_text: str) -> None:
+    """Log agent output, pretty-printing when response is valid JSON."""
+    if not result_text:
+        logger.info("Agent result is empty job_id=%s ticket_id=%s", job_id, ticket_id)
+        return
+
+    candidate = result_text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`")
+        if candidate.startswith("json"):
+            candidate = candidate[4:].strip()
 
     try:
-        data = json.loads(body)
-        job_id = data.get("event_id") or data.get("incident_key", "")
-        ticket_id = data.get("incident_key", "")
-        reporter_id = ""
-        description = build_incident_prompt(data)
-
-        alert = data.get("alert", {})
-        scope = data.get("scope", {})
-        alert_name = alert.get("name") or alert.get("labels", {}).get("alertname", "")
-        summary = alert.get("summary") or alert.get("annotations", {}).get("summary", "")
-        selected_skills = select_incident_skills(data)
-
-        logger.info("=" * 60)
-        logger.info("Received incident from queue")
-        logger.info("=" * 60)
-        logger.info("Event ID: %s", job_id)
-        logger.info("Incident Key: %s", ticket_id)
-        logger.info("Alert Name: %s", alert_name)
-        logger.info("Summary: %s", summary)
-        logger.info("Selected Skills: %s", ", ".join(skill.skill_id for skill in selected_skills))
+        parsed = json.loads(candidate)
         logger.info(
-            "Scope: host=%s resource_type=%s resource_name=%s",
-            scope.get("host"),
-            scope.get("resource_type"),
-            scope.get("resource_name"),
-        )
-        logger.info("=" * 60)
-
-        report_to_ui(
+            "Agent result JSON job_id=%s ticket_id=%s:\n%s",
             job_id,
             ticket_id,
-            reporter_id,
-            "STATUS_UPDATE",
-            "INFO",
-            "INCIDENT_AGENT",
-            "Incident received. Starting investigation...",
-            status="RUNNING",
-            progress=10,
+            json.dumps(parsed, ensure_ascii=False, indent=2),
         )
+    except Exception:
+        logger.info(
+            "Agent result (non-JSON) job_id=%s ticket_id=%s:\n%s",
+            job_id,
+            ticket_id,
+            result_text,
+        )
+
+
+async def process_message(message: IncomingMessage) -> None:
+    """Process a single queue message and publish agent output."""
+    async with message.process():
+        body_text = ""
+        try:
+            body_text = message.body.decode("utf-8", errors="replace")
+            data = json.loads(body_text)
+        except Exception as exc:
+            logger.error("Invalid message body: %s", exc)
+            return
+
+        job_id, ticket_id, reporter_id = _extract_ids(data)
+        prompt = _build_prompt(data)
+
+        logger.info("Processing RabbitMQ task job_id=%s ticket_id=%s", job_id, ticket_id)
 
         try:
             agent = ClaudeAIAgent()
-            logger.info("Sending incident to Claude AI Agent...")
+            result = await agent.invoke(prompt, context_id="rabbitmq-consumer")
+            result_text = _extract_agent_response_text(result)
+            metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
+            _log_result_json(job_id, ticket_id, result_text)
 
-            report_to_ui(
-                job_id,
-                ticket_id,
-                reporter_id,
-                "LOG",
-                "INFO",
-                "CLAUDE_AGENT",
-                "Invoking Claude AI Agent for incident investigation...",
-                progress=20,
+            _publish_result(
+                job_id=job_id,
+                ticket_id=ticket_id,
+                reporter_id=reporter_id,
+                status="COMPLETED",
+                message="Task processed successfully",
+                result_text=result_text,
+                metadata=metadata if isinstance(metadata, dict) else None,
             )
-
-            result = asyncio.run(agent.invoke(description, context_id="rabbitmq-consumer"))
-            response = _extract_agent_response_text(result)
-
-            logger.info("=" * 60)
-            logger.info("AI agent response")
-            logger.info("=" * 60)
-            logger.info("Raw Response: %s...", response[:500])
-            logger.info("=" * 60)
-
-            try:
-                response_data = _extract_json_payload(response)
-                parsed_result = TroubleshootingResult.model_validate(response_data)
-                details = _build_result_details(parsed_result)
-
-                logger.info("Parsed Status: %s", parsed_result.status)
-                logger.info("Parsed Summary: %s", parsed_result.summary)
-                logger.info("Parsed Confidence: %.2f", parsed_result.confidence)
-                logger.info("Probable Cause: %s", parsed_result.diagnosis.probable_cause)
-
-                report_to_ui(
-                    job_id,
-                    ticket_id,
-                    reporter_id,
-                    "LOG",
-                    "INFO",
-                    "INCIDENT_AGENT",
-                    (
-                        f"Root cause: {parsed_result.diagnosis.probable_cause} | "
-                        f"Confidence: {parsed_result.confidence:.2f}"
-                    ),
-                    progress=80,
-                    details=details,
-                )
-
-                if parsed_result.status == "NEEDS_INFO":
-                    logger.warning("Incident investigation requires additional context")
-                    report_to_ui(
-                        job_id,
-                        ticket_id,
-                        reporter_id,
-                        "STATUS_UPDATE",
-                        "WARNING",
-                        "INCIDENT_AGENT",
-                        parsed_result.summary,
-                        status="NEEDS_INFO",
-                        progress=100,
-                        details=details,
-                    )
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-                    logger.info("Incident marked as NEEDS_INFO for incident key %s", ticket_id)
-                    logger.info("=" * 60)
-                    return
-
-                report_to_ui(
-                    job_id,
-                    ticket_id,
-                    reporter_id,
-                    "STATUS_UPDATE",
-                    "INFO",
-                    "INCIDENT_AGENT",
-                    parsed_result.summary,
-                    status=parsed_result.status,
-                    progress=100,
-                    details=details,
-                )
-
-            except json.JSONDecodeError as e:
-                logger.error("AI response is not valid JSON: %s", e)
-
-                if not response or response.strip() == "":
-                    error_message = "There is a problem in the AI platform. Please check Langfuse for details."
-                    logger.error("AI response is empty")
-                    report_to_ui(
-                        job_id,
-                        ticket_id,
-                        reporter_id,
-                        "LOG",
-                        "ERROR",
-                        "CLAUDE_AGENT",
-                        error_message,
-                        progress=50,
-                    )
-                    report_to_ui(
-                        job_id,
-                        ticket_id,
-                        reporter_id,
-                        "STATUS_UPDATE",
-                        "ERROR",
-                        "INCIDENT_AGENT",
-                        error_message,
-                        status="FAILED",
-                        progress=100,
-                    )
-                else:
-                    report_to_ui(
-                        job_id,
-                        ticket_id,
-                        reporter_id,
-                        "LOG",
-                        "ERROR",
-                        "CLAUDE_AGENT",
-                        f"AI response is not valid JSON. Raw response: {response[:200]}...",
-                        progress=50,
-                    )
-                    report_to_ui(
-                        job_id,
-                        ticket_id,
-                        reporter_id,
-                        "STATUS_UPDATE",
-                        "ERROR",
-                        "INCIDENT_AGENT",
-                        f"Failed to parse AI response as JSON. Error: {str(e)}",
-                        status="FAILED",
-                        progress=100,
-                    )
-            except ValidationError as e:
-                logger.error("AI response failed schema validation: %s", e)
-                report_to_ui(
-                    job_id,
-                    ticket_id,
-                    reporter_id,
-                    "LOG",
-                    "ERROR",
-                    "INCIDENT_AGENT",
-                    f"AI response failed schema validation: {str(e)[:300]}",
-                    progress=50,
-                )
-                report_to_ui(
-                    job_id,
-                    ticket_id,
-                    reporter_id,
-                    "STATUS_UPDATE",
-                    "ERROR",
-                    "INCIDENT_AGENT",
-                    "AI response did not match the troubleshooting result schema.",
-                    status="FAILED",
-                    progress=100,
-                )
-
-        except Exception as e:
-            error_msg = f"Error processing with AI Agent: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            report_to_ui(
-                job_id,
-                ticket_id,
-                reporter_id,
-                "STATUS_UPDATE",
-                "ERROR",
-                "INCIDENT_AGENT",
-                error_msg,
+            logger.info("Task completed job_id=%s ticket_id=%s", job_id, ticket_id)
+        except Exception as exc:
+            logger.error("Error processing with AI Agent: %s", exc, exc_info=True)
+            _publish_result(
+                job_id=job_id,
+                ticket_id=ticket_id,
+                reporter_id=reporter_id,
                 status="FAILED",
-                progress=100,
+                message=f"Error processing with AI Agent: {exc}",
             )
 
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-        logger.info("Message acknowledged and processing completed for incident key %s", ticket_id)
-        logger.info("=" * 60)
 
-    except json.JSONDecodeError as e:
-        error_msg = f"Failed to parse message body: {e}"
-        logger.error(error_msg)
-        if job_id:
-            report_to_ui(
-                job_id,
-                ticket_id or "",
-                reporter_id or "",
-                "STATUS_UPDATE",
-                "ERROR",
-                "INCIDENT_AGENT",
-                error_msg,
-                status="FAILED",
-            )
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-
-    except Exception as e:
-        error_msg = f"Error processing incident: {e}"
-        logger.error(error_msg, exc_info=True)
-        if job_id:
-            report_to_ui(
-                job_id,
-                ticket_id or "",
-                reporter_id or "",
-                "STATUS_UPDATE",
-                "ERROR",
-                "INCIDENT_AGENT",
-                error_msg,
-                status="FAILED",
-            )
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-
-
-def start_consumer() -> None:
-    """Start the RabbitMQ consumer for correlated incidents."""
+async def _start_consumer_async() -> None:
     rabbitmq_config = AppConfig.get_rabbitmq_config()
+    connection = await aio_pika.connect_robust(rabbitmq_config.RABBITMQ_URL)
 
-    try:
-        connection = pika.BlockingConnection(pika.URLParameters(rabbitmq_config.RABBITMQ_URL))
-        channel = connection.channel()
+    async with connection:
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=1)
 
-        channel.exchange_declare(
-            exchange=rabbitmq_config.RABBITMQ_EXCHANGE,
-            exchange_type=rabbitmq_config.RABBITMQ_EXCHANGE_TYPE,
+        await channel.declare_exchange(
+            rabbitmq_config.RABBITMQ_EXCHANGE,
+            aio_pika.ExchangeType.TOPIC,
             durable=True,
         )
-        channel.queue_declare(queue=rabbitmq_config.RABBITMQ_TASK_QUEUE, durable=True)
-        channel.queue_bind(
-            queue=rabbitmq_config.RABBITMQ_TASK_QUEUE,
-            exchange=rabbitmq_config.RABBITMQ_EXCHANGE,
+
+        queue = await channel.declare_queue(rabbitmq_config.RABBITMQ_TASK_QUEUE, durable=True)
+        await queue.bind(
+            rabbitmq_config.RABBITMQ_EXCHANGE,
             routing_key=rabbitmq_config.RABBITMQ_ROUTING_KEY,
         )
-
-        channel.basic_qos(prefetch_count=1)
-        channel.basic_consume(
-            queue=rabbitmq_config.RABBITMQ_TASK_QUEUE,
-            on_message_callback=process_ticket,
-        )
+        await queue.consume(process_message)
 
         logger.info(
-            "Incident Agent Consumer is ONLINE. Listening on queue '%s' bound to '%s' with routing key '%s'",
+            "Consumer ONLINE queue='%s' exchange='%s' routing_key='%s'",
             rabbitmq_config.RABBITMQ_TASK_QUEUE,
             rabbitmq_config.RABBITMQ_EXCHANGE,
             rabbitmq_config.RABBITMQ_ROUTING_KEY,
         )
         logger.info("Press Ctrl+C to stop...")
 
-        channel.start_consuming()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            pass
 
+
+def start_consumer() -> None:
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    try:
+        asyncio.run(_start_consumer_async())
     except KeyboardInterrupt:
         logger.info("Consumer stopped by user")
-    except Exception as e:
-        logger.error("Consumer error: %s", e)
+    except Exception as exc:
+        logger.error("Consumer error: %s", exc, exc_info=True)
         raise
-    finally:
-        if "connection" in locals() and connection.is_open:
-            connection.close()
-            logger.info("RabbitMQ connection closed")
 
 
 if __name__ == "__main__":
     start_consumer()
 
 
-__all__ = ["report_to_ui", "process_ticket", "start_consumer"]
+__all__ = ["process_message", "start_consumer"]

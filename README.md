@@ -464,7 +464,7 @@ windows-troubleshooter/
 |---|---|---|
 | `PROMETHEUS_BASE_URL` | `http://localhost:9090` | Prometheus API base URL |
 | `LOKI_BASE_URL` | `http://localhost:3100` | Loki API base URL |
-| `WATCHED_PROCESS_REGEX` | `(?i)wordpad\|write` | Regex for process name matching in correlator queries |
+| `WATCHED_PROCESS_REGEX` | `(?i)wordpad\|write` (alternation pipe) | Regex for process name matching in correlator queries |
 | `WATCHED_PROCESS_NAMES` | _(empty)_ | Comma-separated process names for rule generation |
 | `DEFAULT_LOOKBACK_SECONDS` | `300` | Evidence window duration |
 | `MAX_LOGS_PER_EVENT` | `30` | Max log entries per incident |
